@@ -15,7 +15,6 @@ Apache License 2.0
 © IBM Research, 2024
 """
 
-
 import os, json, gzip, zipfile
 from pathlib import Path
 from typing import List, Dict, Optional
