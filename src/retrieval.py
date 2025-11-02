@@ -15,11 +15,13 @@ Apache License 2.0
 © IBM Research, 2024
 """
 
-import os, json, gzip, zipfile
+import os, json, zipfile
 from pathlib import Path
 from typing import List, Dict, Optional
+from openai import OpenAI
 
 def load_passages_from_zip(zip_path: str | Path, limit: Optional[int] = None) -> List[Dict]:
+
     zip_path = Path(zip_path)
     assert zip_path.suffix == ".zip", f"Expected a .zip file, got {zip_path}"
     inner_filename = zip_path.stem  # file.jsonl.zip → file.jsonl
@@ -42,3 +44,17 @@ def load_passages_from_zip(zip_path: str | Path, limit: Optional[int] = None) ->
                 if limit and n >= limit:
                     break
     return passages
+
+def embed_passages(passages: List[Dict]) -> List[List[float]]:
+
+    client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+
+    texts = [p["text"] for p in passages]
+
+    response = client.embeddings.create(
+        model="text-embedding-3-small",
+        input=texts
+    )
+
+    embeddings = [item.embedding for item in response.data]
+    return embeddings
