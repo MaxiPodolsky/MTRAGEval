@@ -33,7 +33,7 @@ collection = Collection(name=collection_name, schema=schema)
 
 
 ### load JSONL data
-file_path = "clapnq_5000.jsonl"  # load the jsonl file , here the clapnq_5000 is a test file with only 5000 docs 
+file_path = "clapnq_5000.jsonl"  # load the jsonl file , here the clapnq_5000 is a test file with only 5000 docs
 ids, titles, texts = [], [], []
 with open(file_path, "r", encoding="utf-8") as f:
     for line in f:
@@ -54,7 +54,7 @@ print(f"Using: {device}")
 
 model = FlagAutoModel.from_finetuned(
     "BAAI/bge-small-en",
-    use_fp16=(device == "cuda") 
+    use_fp16=(device == "cuda")
 )
 
 
@@ -63,7 +63,7 @@ print("Generating BGE Embedding...")
 embeddings = []
 batch_size = 256  
 
-for i in tqdm(range(0, len(texts), batch_size), desc="genearte Embeddings"):
+for i in tqdm(range(0, len(texts), batch_size), desc="generate Embeddings"):
     batch = texts[i : i + batch_size]
     batch_embeddings = model.encode(batch)
     embeddings.extend(batch_embeddings.tolist())
@@ -94,7 +94,7 @@ try:
 except ImportError:
     print("Joblib is not installed, so single-threaded processing is used..")
     sparse_vectors = []
-    for doc in tqdm(tokenized_corpus, desc="Genrating sparse vectors"):
+    for doc in tqdm(tokenized_corpus, desc="Generating sparse vectors"):
         scores = bm25.get_scores(doc)
         indices = np.where(scores > 0)[0]
         values = scores[indices]
@@ -134,7 +134,7 @@ collection.load()
 print("Data import and indexing complete!")
 
 
-#---------------------------Serach Test---------------------------#
+#---------------------------Search Test---------------------------#
 
 
 # hybrid search function
@@ -180,15 +180,27 @@ def hybrid_search(query, alpha=0.6, top_k=5):
         reqs=[dense_req, sparse_req],
         rerank=rerank,
         limit=top_k,
-        output_fields=["title", "text"]
+        output_fields=["title", "text", "id"]
     )
-    
+
     print(f"\n Search：{query}")
-    print(f" Weights：Dense={alpha:.2f}, Sparse={1-alpha:.2f}\n")
-    
+    print(f" Weights：Dense={alpha:.2f}, Sparse={1 - alpha:.2f}\n")
+
     for i, hit in enumerate(res[0], 1):
         print(f"{i}. [score={hit.score:.3f}] {hit.entity.get('title')}")
         print(f"   {hit.entity.get('text')[:160]}...\n")
+
+    contexts = []                           #format ready for eval
+    for hit in res[0]:
+        context_entry = {
+            "document_id": str(hit.id),
+            "source": "",
+            "score": hit.score,
+            "text": hit.entity.get("text"),
+            "title": hit.entity.get("title")
+        }
+        contexts.append(context_entry)
+        print(contexts)
 
 
 # test hybrid search
