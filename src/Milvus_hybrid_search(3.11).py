@@ -10,9 +10,10 @@ from rank_bm25 import BM25Okapi
 from FlagEmbedding import FlagAutoModel
 from tqdm import tqdm
 
+MILVUS_URI = 'http://1.92.82.153:19530'  #Milvus uri for server
 
 ### connect Milvus
-connections.connect("default", host="127.0.0.1", port="19530")
+connections.connect("default", host=MILVUS_URI, port="19530")
 
 collection_name = "clapng_5000"  #create the collection name , name it as your like
 
@@ -190,8 +191,9 @@ def hybrid_search(query, alpha=0.6, top_k=5):
         print(f"{i}. [score={hit.score:.3f}] {hit.entity.get('title')}")
         print(f"   {hit.entity.get('text')[:160]}...\n")
 
+    retrieval_json_obj = []
     contexts = []                           #format ready for eval
-    for hit in res[0]:
+    for hit in res:
         context_entry = {
             "document_id": str(hit.id),
             "source": "",
@@ -200,7 +202,7 @@ def hybrid_search(query, alpha=0.6, top_k=5):
             "title": hit.entity.get("title")
         }
         contexts.append(context_entry)
-        print(contexts)
+    print(contexts)
 
 
 # test hybrid search
