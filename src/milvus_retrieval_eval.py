@@ -17,16 +17,31 @@ load_dotenv()
 # ==================== Configuration ====================
 MILVUS_HOST = '1.92.82.153'
 MILVUS_PORT = '19530'
-COLLECTION_NAME = "clapnq_OpenAI"
+COLLECTION_NAMES = [{"clapnq_OpenAI", "cloud_OpenAI", "fiqa_OpenAI"}]
 
-# Collection name for evaluation output (update based on your dataset)
-EVAL_COLLECTION_NAME = "mt-rag-clapnq-elser-512-100-20240503"
-
-# Query file path (JSONL format with queries)
-QUERY_FILE = "../data/clapnq_questions.jsonl"
-
+# just take the one you want to test on, as far as the evaluation showed it still just evaluates one corpus, but easiest to just comment out
+DATASETS = [
+    {
+        "collection": "clapnq_OpenAI",
+        "eval_collection": "mt-rag-clapnq-elser-512-100-20240503",
+        "query_file": "human/retrieval_tasks/clapnq/clapnq_rewrite.jsonl",
+        "corpus_file": "data/clapnq.jsonl"
+    },
+    {
+        "collection": "cloud_OpenAI",
+        "eval_collection": "mt-rag-ibmcloud-elser-512-100-20240502",
+        "query_file": "human/retrieval_tasks/cloud/cloud_rewrite.jsonl",
+        "corpus_file": "../data/cloud.jsonl"
+    },
+    {
+        "collection": "fiqa_OpenAI",
+        "eval_collection": "mt-rag-fiqa-beir-elser-512-100-20240501",
+        "query_file": "human/retrieval_tasks/fiqa/fiqa_rewrite.jsonl",
+        "corpus_file": "../data/fiqa.jsonl"
+    }
+]
 # Output file path
-OUTPUT_FILE = "retrieval_results_clapnq_query_id.jsonl"
+OUTPUT_FILE = "results/retrieval_results.jsonl"
 
 # Search parameters
 ALPHA = 0.6  # Dense weight (sparse = 1 - alpha)
@@ -35,15 +50,6 @@ TOP_K = 10  # Number of results to retrieve
 # BM25 parameters (matching hybrid_embedding.py)
 K1 = 1.2
 B = 0.75
-
-# ==================== Connect to Milvus ====================
-print("Connecting to Milvus...")
-connections.connect("default", host=MILVUS_HOST, port=MILVUS_PORT)
-
-# Load collection
-collection = Collection(name=COLLECTION_NAME)
-collection.load()
-print(f"Collection '{COLLECTION_NAME}' loaded successfully")
 
 # ==================== Initialize OpenAI Client ====================
 print("Initializing OpenAI client...")
@@ -85,45 +91,6 @@ def bm25_query_vector(tokens, idf, avgdl, k=1.2, b=0.75):
                 vec[term_id(t)] = float(w)
     return vec
 
-
-# ==================== Load Corpus for BM25 Stats ====================
-print("Loading corpus for BM25 statistics...")
-CORPUS_FILE = "../data/clapnq.jsonl"
-
-corpus_texts = []
-IDF = {}
-AVGDL = 0
-
-try:
-    with open(CORPUS_FILE, "r", encoding="utf-8") as f:
-        for line in f:
-            if line.strip():
-                obj = json.loads(line)
-                text = (obj.get("content") or obj.get("text") or "").strip()
-                corpus_texts.append(text)
-
-    print(f"Loaded {len(corpus_texts)} documents")
-    print("Computing BM25 statistics...")
-    tokenized_corpus = [t.lower().split() for t in tqdm(corpus_texts, desc="Tokenizing")]
-    IDF, AVGDL = compute_bm25_stats(tokenized_corpus)
-    print(f"Computed IDF for {len(IDF)} unique terms, AVGDL={AVGDL:.2f}")
-
-except FileNotFoundError:
-    print(f"Warning: Corpus file '{CORPUS_FILE}' not found.")
-    print("BM25 sparse search will be disabled.")
-
-# ==================== Load Queries ====================
-print(f"\nLoading queries from {QUERY_FILE}...")
-queries = []
-try:
-    with open(QUERY_FILE, "r", encoding="utf-8") as f:
-        for line in f:
-            if line.strip():
-                obj = json.loads(line)
-                queries.append(obj)
-    print(f"Loaded {len(queries)} queries")
-except FileNotFoundError:
-    print(f"Warning: Query file '{QUERY_FILE}' not found!")
 
 
 # ==================== Hybrid Search Function ====================
@@ -195,43 +162,102 @@ def hybrid_search(query_text, alpha=0.6, top_k=10):
 
     return contexts
 
+print("Connecting to Milvus...")
+connections.connect("default", host=MILVUS_HOST, port=MILVUS_PORT)
 
-# ==================== Process All Queries ====================
-print(f"\nProcessing {len(queries)} queries...")
-print(f"Search parameters: alpha={ALPHA}, top_k={TOP_K}")
-print(f"BM25 parameters: k1={K1}, b={B}")
-print(f"Output file: {OUTPUT_FILE}\n")
+open(OUTPUT_FILE, "w").close()              #clear the file once of old results SAVE BEFORE RUNNING NEW!
 
-results = []
-for query_obj in tqdm(queries, desc="Processing queries"):
-    task_id = query_obj.get("_id", "unknown")
-    query_text = query_obj.get("text", "")
+for dataset in DATASETS:
+    COLLECTION_NAME = dataset["collection"]
+    EVAL_COLLECTION_NAME = dataset["eval_collection"]
+    QUERY_FILE = dataset["query_file"]
+    CORPUS_FILE = dataset["corpus_file"]
 
-    if not query_text:
-        print(f"Warning: Empty query for task_id={task_id}, skipping...")
-        continue
+    print("\n============================================")
+    print(f"Running dataset: {COLLECTION_NAME}")
+    print("============================================\n")
+    # ==================== load connection from milvus ====================
 
-    # Perform hybrid search
-    contexts = hybrid_search(query_text, alpha=ALPHA, top_k=TOP_K)
+    # Load collection
+    collection = Collection(name=COLLECTION_NAME)
+    collection.load()
+    print(f"Collection '{COLLECTION_NAME}' loaded successfully")
 
-    # Create result object in evaluation format
-    result_obj = {
-        "task_id": task_id,
-        "query": query_text,
-        "contexts": contexts,
-        "Collection": EVAL_COLLECTION_NAME
-    }
+    # ==================== Load Corpus for BM25 Stats ====================
+    print("Loading corpus for BM25 statistics...")
 
-    results.append(result_obj)
+    corpus_texts = []
+    IDF = {}
+    AVGDL = 0
 
-# ==================== Save Results ====================
-print(f"\nSaving results to {OUTPUT_FILE}...")
-with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
-    for result in results:
-        f.write(json.dumps(result, ensure_ascii=False) + "\n")
+    try:
+        with open(CORPUS_FILE, "r", encoding="utf-8") as f:
+            for line in f:
+                if line.strip():
+                    obj = json.loads(line)
+                    text = (obj.get("content") or obj.get("text") or "").strip()
+                    corpus_texts.append(text)
 
-print(f"✓ Successfully saved {len(results)} results")
-print(f"\nResults ready for evaluation!")
+        print(f"Loaded {len(corpus_texts)} documents")
+        print("Computing BM25 statistics...")
+        tokenized_corpus = [t.lower().split() for t in tqdm(corpus_texts, desc="Tokenizing")]
+        IDF, AVGDL = compute_bm25_stats(tokenized_corpus)
+        print(f"Computed IDF for {len(IDF)} unique terms, AVGDL={AVGDL:.2f}")
+
+    except FileNotFoundError:
+        print(f"Warning: Corpus file '{CORPUS_FILE}' not found.")
+        print("BM25 sparse search will be disabled.")
+
+    # ==================== Load Queries ====================
+    print(f"\nLoading queries from {QUERY_FILE}...")
+    queries = []
+    try:
+        with open(QUERY_FILE, "r", encoding="utf-8") as f:
+            for line in f:
+                if line.strip():
+                    obj = json.loads(line)
+                    queries.append(obj)
+        print(f"Loaded {len(queries)} queries")
+    except FileNotFoundError:
+        print(f"Warning: Query file '{QUERY_FILE}' not found!")
+
+    # ==================== Process All Queries ====================
+
+    print(f"\nProcessing {len(queries)} queries...")
+    print(f"Search parameters: alpha={ALPHA}, top_k={TOP_K}")
+    print(f"BM25 parameters: k1={K1}, b={B}")
+    print(f"Output file: {OUTPUT_FILE}\n")
+
+    results = []
+    for query_obj in tqdm(queries, desc="Processing queries"):
+        task_id = query_obj.get("_id", "unknown")
+        query_text = query_obj.get("text", "")
+
+        if not query_text:
+            print(f"Warning: Empty query for task_id={task_id}, skipping...")
+            continue
+
+        # Perform hybrid search
+        contexts = hybrid_search(query_text, alpha=ALPHA, top_k=TOP_K)
+
+        # Create result object in evaluation format
+        result_obj = {
+            "task_id": task_id,
+            "query": query_text,
+            "contexts": contexts,
+            "Collection": EVAL_COLLECTION_NAME
+        }
+
+        results.append(result_obj)
+
+    # ==================== Save Results ====================
+    print(f"\nSaving results to {OUTPUT_FILE}...")
+    with open(OUTPUT_FILE, "a", encoding="utf-8") as f:
+        for result in results:
+            f.write(json.dumps(result, ensure_ascii=False) + "\n")
+
+    print(f"✓ Successfully saved {len(results)} results")
+    print(f"\nResults ready for evaluation!")
 
 # ==================== Display Sample Results ====================
 if results:
