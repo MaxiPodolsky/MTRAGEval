@@ -14,10 +14,12 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # 1) Connect Milvus
-connections.connect("default", host="127.0.0.1", port="19530")
+connections.connect("default", uri="http://1.92.82.153:19530")
+
+print("Connection established")
 
 # 2) Use a consistent collection name
-collection_name = "clapnq"
+collection_name = "govt_OpenAI"
 
 # 3) Drop/recreate
 if utility.has_collection(collection_name):
@@ -27,7 +29,7 @@ if utility.has_collection(collection_name):
 fields = [
     FieldSchema(name="id", dtype=DataType.VARCHAR, is_primary=True, max_length=128),
     FieldSchema(name="title", dtype=DataType.VARCHAR, max_length=256),
-    FieldSchema(name="text", dtype=DataType.VARCHAR, max_length=4096),
+    FieldSchema(name="text", dtype=DataType.VARCHAR, max_length=20000),
     FieldSchema(name="dense_embedding", dtype=DataType.FLOAT_VECTOR, dim=1536),
     FieldSchema(name="sparse_embedding", dtype=DataType.SPARSE_FLOAT_VECTOR),
 ]
@@ -35,7 +37,7 @@ schema = CollectionSchema(fields, description="Hybrid BM25 + OpenAI embeddings")
 collection = Collection(name=collection_name, schema=schema)
 
 # ---------- Load JSONL ----------
-JSONL_PATH = "../data/corpora/passage_level/clapnq.jsonl/clapnq.jsonl"
+JSONL_PATH = "../data/corpora/passage_level/govt.jsonl/govt.jsonl"
 
 ids, titles, texts = [], [], []
 with open(JSONL_PATH, "r", encoding="utf-8") as f:
@@ -43,9 +45,16 @@ with open(JSONL_PATH, "r", encoding="utf-8") as f:
         if not line.strip():
             continue
         obj = json.loads(line)
-        ids.append(str(obj.get("id") or obj.get("document_id")))
+
+        text = (obj.get("content") or obj.get("text") or "").strip()
+        if not text:
+            # skip completely empty docs (only newlines / whitespace)
+            continue
+
+        doc_id = obj.get("id") or obj.get("_id")
+        ids.append(str(doc_id))
         titles.append(obj.get("title", "") or "")
-        texts.append((obj.get("content") or obj.get("text") or "").strip())
+        texts.append(text)
 
 print(f"Loaded {len(texts)} documents from {JSONL_PATH}")
 

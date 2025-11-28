@@ -14,7 +14,7 @@ from tqdm import tqdm
 ### connect Milvus
 connections.connect("default", host="127.0.0.1", port="19530")
 
-collection_name = "clapng_5000"  #create the collection name , name it as your like
+collection_name = "clapng_5000_OpenAi"  #create the collection name , name it as your like
 
 # if already exists, drop old one
 if utility.has_collection(collection_name):
