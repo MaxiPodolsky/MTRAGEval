@@ -28,7 +28,7 @@ if utility.has_collection(collection_name):
 # 4) Schema (dense + sparse)
 fields = [
     FieldSchema(name="id", dtype=DataType.VARCHAR, is_primary=True, max_length=128),
-    FieldSchema(name="title", dtype=DataType.VARCHAR, max_length=256),
+    FieldSchema(name="title", dtype=DataType.VARCHAR, max_length=1024),
     FieldSchema(name="text", dtype=DataType.VARCHAR, max_length=20000),
     FieldSchema(name="dense_embedding", dtype=DataType.FLOAT_VECTOR, dim=1536),
     FieldSchema(name="sparse_embedding", dtype=DataType.SPARSE_FLOAT_VECTOR),
@@ -37,7 +37,7 @@ schema = CollectionSchema(fields, description="Hybrid BM25 + OpenAI embeddings")
 collection = Collection(name=collection_name, schema=schema)
 
 # ---------- Load JSONL ----------
-JSONL_PATH = "../data/corpora/passage_level/govt.jsonl/govt.jsonl"
+JSONL_PATH = "../data/corpora/passage_level/govt.jsonl/govt_clean.jsonl"
 
 ids, titles, texts = [], [], []
 with open(JSONL_PATH, "r", encoding="utf-8") as f:
