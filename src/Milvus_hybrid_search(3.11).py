@@ -15,7 +15,7 @@ MILVUS_URI = 'http://1.92.82.153:19530'  #Milvus uri for server
 ### connect Milvus
 connections.connect("default", host=MILVUS_URI, port="19530")
 
-collection_name = "clapng_5000"  #create the collection name , name it as your like
+collection_name = "clapng_5000_OpenAi"  #create the collection name , name it as your like
 
 # if already exists, drop old one
 if utility.has_collection(collection_name):
