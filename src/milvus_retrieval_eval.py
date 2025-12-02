@@ -17,35 +17,41 @@ load_dotenv()
 # ==================== Configuration ====================
 MILVUS_HOST = '1.92.82.153'
 MILVUS_PORT = '19530'
-COLLECTION_NAMES = [{"clapnq_OpenAI", "cloud_OpenAI", "fiqa_OpenAI"}]
+COLLECTION_NAMES = [{"clapnq_OpenAI", "cloud_OpenAI", "fiqa_OpenAI", "govt_OpenAI"}]
 
 # just take the one you want to test on, as far as the evaluation showed it still just evaluates one corpus, but easiest to just comment out
 DATASETS = [
-    {
-        "collection": "clapnq_OpenAI",
-        "eval_collection": "mt-rag-clapnq-elser-512-100-20240503",
-        "query_file": "human/retrieval_tasks/clapnq/clapnq_rewrite.jsonl",
-        "corpus_file": "data/clapnq.jsonl"
-    },
+    #{
+    #    "collection": "clapnq_OpenAI",
+    #    "eval_collection": "mt-rag-clapnq-elser-512-100-20240503",
+    #    "query_file": "human/retrieval_tasks/clapnq/clapnq_rewrite.jsonl",
+    #    "corpus_file": "corpora/passage_level/clapnq.jsonl"
+    #},
     {
         "collection": "cloud_OpenAI",
         "eval_collection": "mt-rag-ibmcloud-elser-512-100-20240502",
         "query_file": "human/retrieval_tasks/cloud/cloud_rewrite.jsonl",
-        "corpus_file": "../data/cloud.jsonl"
-    },
-    {
-        "collection": "fiqa_OpenAI",
-        "eval_collection": "mt-rag-fiqa-beir-elser-512-100-20240501",
-        "query_file": "human/retrieval_tasks/fiqa/fiqa_rewrite.jsonl",
-        "corpus_file": "../data/fiqa.jsonl"
-    }
+        "corpus_file": "corpora/passage_level/cloud.jsonl"
+    }#,
+    #{
+    #    "collection": "fiqa_OpenAI",
+    #    "eval_collection": "mt-rag-fiqa-beir-elser-512-100-20240501",
+    #    "query_file": "human/retrieval_tasks/fiqa/fiqa_rewrite.jsonl",
+    #    "corpus_file": "../data/fiqa.jsonl"
+    #},
+    #{
+    #    "collection": "govt_OpenAI",
+    #    "eval_collection": "mt-rag-govt-beir-elser-512-100-20240611",
+    #    "query_file": "human/retrieval_tasks/govt/govt_rewrite.jsonl",
+    #    "corpus_file": "../data/govt.jsonl"
+    #}
 ]
 # Output file path
-OUTPUT_FILE = "results/retrieval_results.jsonl"
+OUTPUT_FILE = "results/retrieval_results_cloud_1.jsonl"
 
 # Search parameters
-ALPHA = 0.6  # Dense weight (sparse = 1 - alpha)
-TOP_K = 10  # Number of results to retrieve
+ALPHA = 1  # Dense weight (sparse = 1 - alpha)
+TOP_K = 20  # Number of results to retrieve
 
 # BM25 parameters (matching hybrid_embedding.py)
 K1 = 1.2
@@ -92,9 +98,8 @@ def bm25_query_vector(tokens, idf, avgdl, k=1.2, b=0.75):
     return vec
 
 
-
 # ==================== Hybrid Search Function ====================
-def hybrid_search(query_text, alpha=0.6, top_k=10):
+def hybrid_search(query_text, alpha=0.6, top_k=15):
     """
     Perform hybrid search combining OpenAI dense embeddings and BM25 sparse embeddings
     Matches the embedding approach from hybrid_embedding.py
@@ -120,6 +125,7 @@ def hybrid_search(query_text, alpha=0.6, top_k=10):
         tokenized_q = query_text.lower().split()
         sparse_q = bm25_query_vector(tokenized_q, IDF, AVGDL, k=K1, b=B)
 
+
     # Create search requests
     dense_search_params = {"metric_type": "IP", "params": {}}
     sparse_search_params = {"metric_type": "IP", "params": {}}
@@ -138,8 +144,44 @@ def hybrid_search(query_text, alpha=0.6, top_k=10):
         limit=top_k
     )
 
+    # First, get individual search results to inspect scores BEFORE hybrid ranking
+    dense_results = collection.search(
+        data=[dense_q],
+        anns_field="dense_embedding",
+        param=dense_search_params,
+        limit=top_k,
+        output_fields=["title", "text", "id"]
+    )
+
+    sparse_results = collection.search(
+        data=[sparse_q],
+        anns_field="sparse_embedding",
+        param=sparse_search_params,
+        limit=top_k,
+        output_fields=["title", "text", "id"]
+    )
+
+    # Print individual scores for debugging
+    print(f"\n{'=' * 80}")
+    print(f"Query: {query_text[:100]}...")
+    print(f"Alpha: {alpha} (dense weight), {1 - alpha} (sparse weight)")
+    print(f"\nDENSE RESULTS (top 5):")
+    for i, hit in enumerate(dense_results[0][:10], 1):
+        print(f"  {i}. ID: {hit.id:30s} Score: {hit.score:.6f} | {hit.entity.get('title', '')[:50]}")
+
+    print(f"\nSPARSE RESULTS (top 5):")
+    for i, hit in enumerate(sparse_results[0][:10], 1):
+        print(f"  {i}. ID: {hit.id:30s} Score: {hit.score:.6f} | {hit.entity.get('title', '')[:50]}")
+
+    # Check for overlap
+    dense_ids = set(hit.id for hit in dense_results[0][:10])
+    sparse_ids = set(hit.id for hit in sparse_results[0][:10])
+    overlap = len(dense_ids & sparse_ids)
+    print(f"\nOverlap in top-10: {overlap}/10 documents")
+
     # Perform hybrid search with weighted ranker
     rerank = WeightedRanker(alpha, 1 - alpha)
+
 
     res = collection.hybrid_search(
         reqs=[dense_req, sparse_req],
@@ -162,10 +204,11 @@ def hybrid_search(query_text, alpha=0.6, top_k=10):
 
     return contexts
 
+
 print("Connecting to Milvus...")
 connections.connect("default", host=MILVUS_HOST, port=MILVUS_PORT)
 
-open(OUTPUT_FILE, "w").close()              #clear the file once of old results SAVE BEFORE RUNNING NEW!
+open(OUTPUT_FILE, "w").close()  # clear the file once of old results SAVE BEFORE RUNNING NEW!
 
 for dataset in DATASETS:
     COLLECTION_NAME = dataset["collection"]
