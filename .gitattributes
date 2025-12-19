@@ -1,0 +1,4 @@
+corpora/cloud.jsonl filter=lfs diff=lfs merge=lfs -text
+corpora/fiqa.jsonl filter=lfs diff=lfs merge=lfs -text
+corpora/govt.jsonl filter=lfs diff=lfs merge=lfs -text
+corpora/clapnq.jsonl filter=lfs diff=lfs merge=lfs -text
