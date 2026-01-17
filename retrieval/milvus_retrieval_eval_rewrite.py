@@ -10,8 +10,8 @@ import asyncio
 load_dotenv()
 
 # ==================== Configuration ====================
-MILVUS_HOST = '1.92.82.153'
-MILVUS_PORT = '19530'
+MILVUS_HOST = os.getenv('MILVUS_HOST')
+MILVUS_PORT = os.getenv('MILVUS_PORT')
 
 # Map collection names to their corpus files
 CORPUS_MAP = {
