@@ -1,110 +1,114 @@
 import os
 import json
-import math
-from collections import Counter
-import numpy as np
-import xxhash
 from openai import OpenAI
-from pymilvus import (
-    connections, Collection,
-    AnnSearchRequest, WeightedRanker
-)
+from pymilvus import connections, Collection
 from tqdm import tqdm
 from dotenv import load_dotenv
 from google import genai
 import asyncio
-import aiohttp
 
 load_dotenv()
 
 # ==================== Configuration ====================
 MILVUS_HOST = '1.92.82.153'
 MILVUS_PORT = '19530'
-COLLECTION_NAMES = [{"clapnq_OpenAI", "cloud_OpenAI", "fiqa_OpenAI", "govt_OpenAI"}]
 
-# just take the one you want to test on, as far as the evaluation showed it still just evaluates one corpus, but easiest to just comment out
-DATASETS = [
-    #{
-    #    "collection": "clapnq_OpenAI",
-    #    "eval_collection": "mt-rag-clapnq-elser-512-100-20240503",
-    #    "query_file": "../human/retrieval_tasks/clapnq/clapnq_questions.jsonl",
-    #    "corpus_file": "../corpora/passage_level/clapnq.jsonl"
-    #},
-    #{
-    #    "collection": "cloud_OpenAI",
-    #    "eval_collection": "mt-rag-ibmcloud-elser-512-100-20240502",
-    #    "query_file": "../human/retrieval_tasks/cloud/cloud_questions.jsonl",
-    #    "corpus_file": "../corpora/passage_level/cloud.jsonl"
-    #}#,
-    {
-        "collection": "fiqa_OpenAI",
-        "eval_collection": "mt-rag-fiqa-beir-elser-512-100-20240501",
-        "query_file": "../human/retrieval_tasks/fiqa/fiqa_questions.jsonl",
-        "corpus_file": "../corpora/passage_level/fiqa.jsonl"
-    }#,
-    #{
-    #    "collection": "govt_OpenAI",
-    #    "eval_collection": "mt-rag-govt-beir-elser-512-100-20240611",
-    #    "query_file": "../human/retrieval_tasks/govt/govt_rewrite.jsonl",
-    #    "corpus_file": "../corpora/passage_level/govt.jsonl"
-    #}
-]
+# Map collection names to their corpus files
+CORPUS_MAP = {
+    "clapnq": {
+        "collection": "clapnq_OpenAI_large",
+    },
+    "ibmcloud": {
+        "collection": "cloud_OpenAI_large",
+    },
+    "fiqa": {
+        "collection": "fiqa_OpenAI_large",
+    },
+    "govt": {
+        "collection": "govt_OpenAI_large",
+    }
+}
 
-
-
-# Output file path
-OUTPUT_FILE = "results/retrieval_results_fiqa_owngemini-3-pro-fewshot-rewrite_big_smallembedding.jsonl"
+# Input/Output files
+INPUT_FILE = "../human/retrieval_tasks/taskAC.jsonl"
+OUTPUT_FILE = "../results/ragtum_taskA.jsonl"
 
 # Search parameters
-ALPHA = 1  # Dense weight (sparse = 1 - alpha)
-TOP_K = 20  # Number of results to retrieve
-
-# BM25 parameters (matching hybrid_embedding.py)
-K1 = 1.2
-B = 0.75
+TOP_K = 10  # Number of results to retrieve
 
 # ==================== Initialize OpenAI Client ====================
 print("Initializing OpenAI client...")
 client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
 
-
-# ====================  CONVERSATION REWRITE HELPERS ====================
-def parse_conversation(text):
-    """Extract all |user|: turns in order."""
-    lines = text.strip().split("\n")
-    msgs = []
-    for line in lines:
-        if line.startswith("|user|:"):
-            msgs.append(line.replace("|user|:", "").strip())
-    return msgs
+# Global storage for collections
+COLLECTIONS = {}
 
 
-async def rewrite_query_with_context_async(messages):
-    """Async version of query rewriting using Gemini."""
-    if len(messages) == 1:
-        return messages[0]
+# ==================== Conversation Rewrite Functions ====================
+def extract_full_conversation(input_array):
+    """
+    Extract full conversation with both user and agent turns.
+    Returns list of tuples: (speaker, text)
+    """
+    conversation = []
+    for turn in input_array:
+        speaker = turn.get("speaker", "")
+        text = turn.get("text", "")
+        if speaker in ["user", "agent"]:
+            conversation.append((speaker, text))
+    return conversation
+
+
+async def rewrite_query_with_context_async(conversation):
+    """
+    Async version of query rewriting using Gemini.
+    Takes full conversation history (user + agent) and rewrites the last user turn.
+
+    Args:
+        conversation: List of (speaker, text) tuples
+    """
+    # Extract just user messages to check if rewriting is needed
+    user_messages = [text for speaker, text in conversation if speaker == "user"]
+
+    if len(user_messages) == 1:
+        return user_messages[0]
 
     client = genai.Client()
-    conversation_text = "\n".join(
-        f"{i + 1}. {m}" for i, m in enumerate(messages)
-    )
+
+    # Format the full conversation history with both user and agent
+    conversation_lines = []
+    for i, (speaker, text) in enumerate(conversation, 1):
+        role = "User" if speaker == "user" else "Assistant"
+        conversation_lines.append(f"{i}. {role}: {text}")
+
+    conversation_text = "\n".join(conversation_lines)
 
     prompt = f"""
     Instructions: 
-    Rewrite the last user turn into a standalone, keyword-rich search query. 
-    - Resolve all pronouns (it, they, that) using the conversation history.
+    Rewrite the LAST USER turn into a standalone, keyword-rich search query. 
+    - Use the full conversation history (both user questions and assistant responses) to understand context.
+    - Resolve all pronouns (it, they, that, this) using information from previous turns.
     - Remove conversational filler and polite phrases.
+    - Include all relevant details and entities mentioned in the conversation.
     - If the last turn is already standalone, return it as-is.
     - Output ONLY the rewritten query text.
 
     Examples:
+
+    Example 1:
     1. User: "Who is the CEO of Google?" 
-    2. User: "When did he take over?"
+    2. Assistant: "Sundar Pichai is the CEO of Google."
+    3. User: "When did he take over?"
     Rewritten query: When did Sundar Pichai become CEO of Google?
 
-    1. User: "How does photosynthesis work?"
-    2. User: "Does it happen at night?"
-    Rewritten query: Does photosynthesis occur during the night?
+    
+    Example 2:
+    1. User: "What are dialog nodes?"
+    2. Assistant: "Dialog nodes are various types including the Welcome node and Anything else node. You can create custom nodes by adding a condition..."
+    3. User: "What are intents?"
+    4. Assistant: "Intents are the purposes or goals expressed in a customer's input, such as answering a question or processing a bill payment..."
+    5. User: "How is it created?"
+    Rewritten query: How is a dialog node created?
 
     Current Conversation:
     {conversation_text}
@@ -113,213 +117,56 @@ async def rewrite_query_with_context_async(messages):
     """
 
     try:
-        # Run the blocking call in a thread pool
         loop = asyncio.get_event_loop()
         response = await loop.run_in_executor(
             None,
             lambda: client.models.generate_content(
-                model="gemini-3-pro-preview",
+                model="gemini-2.5-flash",
                 contents=prompt
             )
         )
-        print(f"Rewritten query: {response.text.strip()}")
-        return response.text.strip()
+        rewritten = response.text.strip()
+        # Get last user message for logging
+        last_user_msg = [text for speaker, text in conversation if speaker == "user"][-1]
+        print(f"Original conversation ({len(conversation)} turns total, {len(user_messages)} user turns):")
+        print(f"  Last user turn: {last_user_msg}")
+        print(f"  Rewritten: {rewritten}")
+        return rewritten
     except Exception as e:
         print(f"Gemini rewrite error: {e}")
-        return messages[-1]
-
-
-async def rewrite_query_if_needed_async(raw_text):
-    """Async wrapper for query rewriting."""
-    msgs = parse_conversation(raw_text)
-    if len(msgs) <= 1:
-        return raw_text
-    return await rewrite_query_with_context_async(msgs)
-
-
-async def process_query_batch(queries, batch_size=10):
-    """Process queries in batches with concurrency limit."""
-    rewritten_queries = []
-
-    for i in range(0, len(queries), batch_size):
-        batch = queries[i:i + batch_size]
-        tasks = [
-            rewrite_query_if_needed_async(q.get("text", ""))
-            for q in batch
-        ]
-        batch_results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        # Handle any errors
-        for j, result in enumerate(batch_results):
-            if isinstance(result, Exception):
-                print(f"Error in query {i + j}: {result}")
-                rewritten_queries.append(batch[j].get("text", ""))
-            else:
-                rewritten_queries.append(result)
-
-    return rewritten_queries
-
-async def process_all_queries_async(queries):
-    """Process all queries with parallel rewriting."""
-    print(f"\nRewriting {len(queries)} queries in parallel...")
-    rewritten_texts = await process_query_batch(queries, batch_size=10)
-
-    results = []
-    for query_obj, query_text in tqdm(
-            zip(queries, rewritten_texts),
-            total=len(queries),
-            desc="Searching"
-    ):
-        task_id = query_obj.get("_id", "unknown")
-
-        if not query_text:
-            print(f"Warning: Empty query for task_id={task_id}, skipping...")
-            continue
-
-        # Perform hybrid search (synchronous)
-        contexts = hybrid_search(query_text, alpha=ALPHA, top_k=TOP_K)
-
-        result_obj = {
-            "task_id": task_id,
-            "query": query_text,
-            "contexts": contexts,
-            "Collection": EVAL_COLLECTION_NAME
-        }
-        results.append(result_obj)
-
-    return results
-
-
-
-# ==================== BM25 Functions (matching hybrid_embedding.py) ====================
-def term_id(term: str) -> int:
-    """Generate stable positive integer key for Milvus sparse vector"""
-    return xxhash.xxh64(term).intdigest() & 0x7FFFFFFF
-
-
-def compute_bm25_stats(tokenized):
-    """Compute IDF and average document length for BM25"""
-    N = len(tokenized)
-    df = Counter()
-    doc_lens = []
-    for toks in tokenized:
-        doc_lens.append(len(toks))
-        df.update(set(toks))
-    avgdl = sum(doc_lens) / max(N, 1)
-    idf = {t: math.log((N - d + 0.5) / (d + 0.5) + 1.0) for t, d in df.items()}
-    return idf, avgdl
-
-
-def bm25_query_vector(tokens, idf, avgdl, k=1.2, b=0.75):
+        return user_messages[-1]
+# ==================== Dense-Only Search Function ====================
+def dense_search(query_text, corpus_key, top_k=20):
     """
-    Generate BM25 sparse vector for query
-    Uses the same term_id function as document indexing
-    """
-    tf = Counter(tokens)
-    # For queries, we use a simplified scoring (no document length normalization)
-    vec = {}
-    for t, f in tf.items():
-        if t in idf:
-            # Query term weight
-            w = idf[t] * f
-            if w > 0:
-                vec[term_id(t)] = float(w)
-    return vec
-
-
-# ==================== Hybrid Search Function ====================
-def hybrid_search(query_text, alpha=0.6, top_k=15):
-    """
-    Perform hybrid search combining OpenAI dense embeddings and BM25 sparse embeddings
-    Matches the embedding approach from hybrid_embedding.py
+    Perform dense-only search on a specific corpus collection
 
     Args:
         query_text: Query string
-        alpha: Weight for dense embedding (0-1), sparse weight = 1 - alpha
+        corpus_key: Key to identify which corpus to search (e.g., 'clapnq', 'fiqa')
         top_k: Number of results to return
-
-    Returns:
-        List of context dictionaries for evaluation
     """
-    # Generate dense embedding using OpenAI (matching hybrid_embedding.py)
+    # Get the right collection
+    collection = COLLECTIONS[corpus_key]
+
+    # Generate dense embedding using OpenAI
     resp = client.embeddings.create(
-        model="text-embedding-3-small",
+        model="text-embedding-3-large",
         input=[query_text]
     )
     dense_q = resp.data[0].embedding
 
-    # Generate BM25 sparse embedding (matching hybrid_embedding.py approach)
-    sparse_q = {}
-    if IDF:  # Only if we have BM25 stats
-        tokenized_q = query_text.lower().split()
-        sparse_q = bm25_query_vector(tokenized_q, IDF, AVGDL, k=K1, b=B)
+    # Perform dense search
+    search_params = {"metric_type": "IP", "params": {}}
 
-
-    # Create search requests
-    dense_search_params = {"metric_type": "IP", "params": {}}
-    sparse_search_params = {"metric_type": "IP", "params": {}}
-
-    dense_req = AnnSearchRequest(
+    res = collection.search(
         data=[dense_q],
         anns_field="dense_embedding",
-        param=dense_search_params,
-        limit=top_k
-    )
-
-    sparse_req = AnnSearchRequest(
-        data=[sparse_q],
-        anns_field="sparse_embedding",
-        param=sparse_search_params,
-        limit=top_k
-    )
-
-    # First, get individual search results to inspect scores BEFORE hybrid ranking
-    dense_results = collection.search(
-        data=[dense_q],
-        anns_field="dense_embedding",
-        param=dense_search_params,
+        param=search_params,
         limit=top_k,
         output_fields=["title", "text", "id"]
     )
 
-    sparse_results = collection.search(
-        data=[sparse_q],
-        anns_field="sparse_embedding",
-        param=sparse_search_params,
-        limit=top_k,
-        output_fields=["title", "text", "id"]
-    )
-
-    # Print individual scores for debugging
-    print(f"\n{'=' * 80}")
-    print(f"Query: {query_text[:100]}...")
-    print(f"Alpha: {alpha} (dense weight), {1 - alpha} (sparse weight)")
-    print(f"\nDENSE RESULTS (top 5):")
-    for i, hit in enumerate(dense_results[0][:10], 1):
-        print(f"  {i}. ID: {hit.id:30s} Score: {hit.score:.6f} | {hit.entity.get('title', '')[:50]}")
-
-    print(f"\nSPARSE RESULTS (top 5):")
-    for i, hit in enumerate(sparse_results[0][:10], 1):
-        print(f"  {i}. ID: {hit.id:30s} Score: {hit.score:.6f} | {hit.entity.get('title', '')[:50]}")
-
-    # Check for overlap
-    dense_ids = set(hit.id for hit in dense_results[0][:10])
-    sparse_ids = set(hit.id for hit in sparse_results[0][:10])
-    overlap = len(dense_ids & sparse_ids)
-    print(f"\nOverlap in top-10: {overlap}/10 documents")
-
-    # Perform hybrid search with weighted ranker
-    rerank = WeightedRanker(alpha, 1 - alpha)
-
-
-    res = collection.hybrid_search(
-        reqs=[dense_req, sparse_req],
-        rerank=rerank,
-        limit=top_k,
-        output_fields=["title", "text", "id"]
-    )
-
-    # Format results for evaluation
+    # Format results
     contexts = []
     for hit in res[0]:
         context_entry = {
@@ -334,108 +181,153 @@ def hybrid_search(query_text, alpha=0.6, top_k=15):
     return contexts
 
 
-#==================================================
+def load_all_collections():
+    """Load all Milvus collections"""
+    print("\n" + "=" * 80)
+    print("Loading Milvus collections...")
+    print("=" * 80 + "\n")
 
-print("Connecting to Milvus...")
-connections.connect("default", host=MILVUS_HOST, port=MILVUS_PORT)
+    for corpus_key, config in CORPUS_MAP.items():
+        collection_name = config["collection"]
+        print(f"Loading collection: {collection_name}")
 
-open(OUTPUT_FILE, "w").close()  # clear the file once of old results SAVE BEFORE RUNNING NEW!
+        try:
+            collection = Collection(name=collection_name)
+            collection.load()
+            COLLECTIONS[corpus_key] = collection
+            print(f"  ✓ Collection loaded successfully\n")
+        except Exception as e:
+            print(f"  ✗ Error loading collection: {e}\n")
 
-for dataset in DATASETS:
-    COLLECTION_NAME = dataset["collection"]
-    EVAL_COLLECTION_NAME = dataset["eval_collection"]
-    QUERY_FILE = dataset["query_file"]
-    CORPUS_FILE = dataset["corpus_file"]
 
-    print("\n============================================")
-    print(f"Running dataset: {COLLECTION_NAME}")
-    print("============================================\n")
-    # ==================== load connection from milvus ====================
+# ==================== Process Queries ====================
+async def process_query_batch(queries, batch_size=10):
+    """Process queries in batches with concurrency limit."""
+    results = []
 
-    # Load collection
-    collection = Collection(name=COLLECTION_NAME)
-    collection.load()
-    print(f"Collection '{COLLECTION_NAME}' loaded successfully")
+    for i in range(0, len(queries), batch_size):
+        batch = queries[i:i + batch_size]
 
-    # ==================== Load Corpus for BM25 Stats ====================
-    print("Loading corpus for BM25 statistics...")
+        # Extract full conversations (user + agent turns)
+        batch_conversations = []
+        for q in batch:
+            if "input" in q:
+                # Extract full conversation with both user and agent
+                conversation = extract_full_conversation(q["input"])
+                batch_conversations.append(conversation)
+            else:
+                # Fallback to text field if input array doesn't exist
+                batch_conversations.append([("user", q.get("text", ""))])
 
-    corpus_texts = []
-    IDF = {}
-    AVGDL = 0
+        # Rewrite queries in parallel
+        rewrite_tasks = [
+            rewrite_query_with_context_async(conversation)
+            for conversation in batch_conversations
+        ]
+        rewritten_texts = await asyncio.gather(*rewrite_tasks, return_exceptions=True)
 
-    try:
-        with open(CORPUS_FILE, "r", encoding="utf-8") as f:
-            for line in f:
-                if line.strip():
-                    obj = json.loads(line)
-                    text = (obj.get("content") or obj.get("text") or "").strip()
-                    corpus_texts.append(text)
+        # Process each query in the batch
+        for j, (query_obj, query_text) in enumerate(zip(batch, rewritten_texts)):
+            if isinstance(query_text, Exception):
+                print(f"Error rewriting query: {query_text}")
+                # Fallback to last user message
+                conv = batch_conversations[j]
+                last_user = [text for speaker, text in conv if speaker == "user"]
+                query_text = last_user[-1] if last_user else ""
 
-        print(f"Loaded {len(corpus_texts)} documents")
-        print("Computing BM25 statistics...")
-        tokenized_corpus = [t.lower().split() for t in tqdm(corpus_texts, desc="Tokenizing")]
-        IDF, AVGDL = compute_bm25_stats(tokenized_corpus)
-        print(f"Computed IDF for {len(IDF)} unique terms, AVGDL={AVGDL:.2f}")
+            task_id = query_obj.get("task_id", query_obj.get("_id", "unknown"))
+            collection_name = query_obj.get("Collection", "")
 
-    except FileNotFoundError:
-        print(f"Warning: Corpus file '{CORPUS_FILE}' not found.")
-        print("BM25 sparse search will be disabled.")
+            # Map collection name to corpus key
+            corpus_key = collection_name
 
-    # ==================== Load Queries ====================
-    print(f"\nLoading queries from {QUERY_FILE}...")
+            if not corpus_key:
+                print(f"Warning: Unknown collection '{collection_name}' for task {task_id}")
+                continue
+
+            if not query_text:
+                print(f"Warning: Empty query for task_id={task_id}, skipping...")
+                continue
+
+            # Perform dense search on the appropriate corpus
+            contexts = dense_search(query_text, corpus_key, top_k=TOP_K)
+
+            result_obj = {
+                "task_id": task_id,
+                "query": query_text,
+                "contexts": contexts,
+                "Collection": collection_name
+            }
+            results.append(result_obj)
+
+    return results
+
+
+# ==================== Main Execution ====================
+async def main():
+    # Connect to Milvus
+    print("Connecting to Milvus...")
+    connections.connect("default", host=MILVUS_HOST, port=MILVUS_PORT)
+
+    # Load all collections
+    load_all_collections()
+
+    # Load queries from mixed file
+    print("\n" + "=" * 80)
+    print(f"Loading queries from {INPUT_FILE}...")
+    print("=" * 80 + "\n")
+
     queries = []
     try:
-        with open(QUERY_FILE, "r", encoding="utf-8") as f:
+        with open(INPUT_FILE, "r", encoding="utf-8") as f:
             for line in f:
                 if line.strip():
                     obj = json.loads(line)
                     queries.append(obj)
-        print(f"Loaded {len(queries)} queries")
+        print(f"Loaded {len(queries)} queries\n")
     except FileNotFoundError:
-        print(f"Warning: Query file '{QUERY_FILE}' not found!")
+        print(f"Error: Input file '{INPUT_FILE}' not found!")
+        return
 
-    # ==================== Process All Queries ====================
+    # Process all queries
+    print(f"Processing {len(queries)} queries...")
+    print(f"Search parameters: Dense-only, top_k={TOP_K}\n")
 
-    print(f"\nProcessing {len(queries)} queries...")
-    print(f"Search parameters: alpha={ALPHA}, top_k={TOP_K}")
-    print(f"BM25 parameters: k1={K1}, b={B}")
-    print(f"Output file: {OUTPUT_FILE}\n")
+    results = await process_query_batch(queries, batch_size=10)
 
-
-    results = asyncio.run(process_all_queries_async(queries))
-
-    # ==================== Save Results ====================
+    # Save results
     print(f"\nSaving results to {OUTPUT_FILE}...")
-    with open(OUTPUT_FILE, "a", encoding="utf-8") as f:
+    with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
         for result in results:
             f.write(json.dumps(result, ensure_ascii=False) + "\n")
 
     print(f"✓ Successfully saved {len(results)} results")
-    print(f"\nResults ready for evaluation!")
 
-# ==================== Display Sample Results ====================
-if results:
-    print("\n" + "=" * 80)
-    print("Sample Result (first query):")
-    print("=" * 80)
-    sample = results[0]
-    print(f"Query ID: {sample['task_id']}")
-    print(f"Query: {sample['query']}")
-    print(f"Collection: {sample['Collection']}")
-    print(f"Number of contexts: {len(sample['contexts'])}")
-    print(f"\nTop 3 results:")
-    for i, ctx in enumerate(sample['contexts'][:3], 1):
-        print(f"\n{i}. Document ID: {ctx['document_id']}")
-        print(f"   Score: {ctx['score']:.4f}")
-        print(f"   Title: {ctx['title']}")
-        print(f"   Text: {ctx['text'][:150]}...")
-    print("=" * 80)
+    # Display sample result
+    if results:
+        print("\n" + "=" * 80)
+        print("Sample Result (first query):")
+        print("=" * 80)
+        sample = results[0]
+        print(f"Query ID: {sample['task_id']}")
+        print(f"Query: {sample['query']}")
+        print(f"Collection: {sample['Collection']}")
+        print(f"Number of contexts: {len(sample['contexts'])}")
+        print(f"\nTop 3 results:")
+        for i, ctx in enumerate(sample['contexts'][:3], 1):
+            print(f"\n{i}. Document ID: {ctx['document_id']}")
+            print(f"   Score: {ctx['score']:.4f}")
+            print(f"   Title: {ctx['title']}")
+            print(f"   Text: {ctx['text'][:150]}...")
+        print("=" * 80)
 
-# ==================== Summary Statistics ====================
-print(f"\nSummary:")
-print(f"  Total queries processed: {len(results)}")
-if results:
-    avg_results = sum(len(r['contexts']) for r in results) / len(results)
-    print(f"  Average results per query: {avg_results:.1f}")
-    print(f"  Output format: Evaluation-ready JSONL")
+    # Summary
+    print(f"\nSummary:")
+    print(f"  Total queries processed: {len(results)}")
+    if results:
+        avg_results = sum(len(r['contexts']) for r in results) / len(results)
+        print(f"  Average results per query: {avg_results:.1f}")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
