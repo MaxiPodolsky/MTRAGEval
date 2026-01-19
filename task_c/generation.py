@@ -9,8 +9,8 @@ from google.genai import types
 load_dotenv()
 
 # ==================== Configuration ====================
-INPUT_FILE = "../results/ragtum_taskA.jsonl"
-OUTPUT_FILE = "../results_C/ragtum_taskC.jsonl"
+INPUT_FILE = "../results/ragtum_taskA_withinput.jsonl"
+OUTPUT_FILE = "../results_C/RAG_withinput.jsonl"
 MODEL_NAME = "gemini-2.0-flash"
 
 # Safety settings to prevent 'None' responses
@@ -65,26 +65,34 @@ limiter = RateLimiter(RPM_LIMIT)
 
 async def check_relevance(client, query, context_item):
     """
-    More lenient relevance check - only filters out completely irrelevant documents.
-    Uses a scoring system to be less strict.
+    Evaluates relevance on a scale of 1-5.
+    Keeps documents with a score of 2 or higher to prevent aggressive stripping.
     """
     text = context_item.get('text', '')
 
-    # Skip empty documents
     if not text.strip():
         return None
 
-    prompt = f"""You are evaluating whether a document could help answer a query.
+    # We ask for Reasoning + Score to improve model "thinking"
+    prompt = f"""Evaluate the relevance of the following Document to the User Query.
 
 Query: "{query}"
-
 Document: "{text}"
 
-Rate the relevance:
-- RELEVANT: Document directly answers the query or contains key information. A (partly) answer is producable with this information.
-- NOT_RELEVANT: Document is unrelated to the query
+Relevance Scale:
+1: Totally Unrelated - No topical overlap.
+2: Weakly Related - Mentions keywords or broad context, but no direct answer.
+3: Partially Relevant - Provides context that helps understand the answer.
+4: Relevant - Contains significant pieces of the answer.
+5: Highly Relevant - Directly and fully addresses the query.
 
-Respond with ONLY ONE of these two options: RELEVANT or NOT_RELEVANT"""
+Instructions:
+1. Provide a brief one-sentence reasoning.
+2. Provide the integer score.
+
+Response Format:
+Reasoning: <brief explanation>
+Score: <integer>"""
 
     wait_time = await limiter.acquire()
     if wait_time > 0:
@@ -98,30 +106,35 @@ Respond with ONLY ONE of these two options: RELEVANT or NOT_RELEVANT"""
                 model=MODEL_NAME,
                 contents=prompt,
                 config=types.GenerateContentConfig(
-                    temperature=0.0,
-                    max_output_tokens=20,
+                    temperature=0.0,  # Keep deterministic
+                    max_output_tokens=50,
                     safety_settings=SAFETY_SETTINGS
                 )
             )
         )
 
         if not response or not response.text:
-            # If unclear, keep the document (fail open)
             return context_item
 
-        response_text = response.text.strip().upper()
+        response_text = response.text.strip()
 
-        # Keep everything except NOT_RELEVANT
-        if "NOT_RELEVANT" in response_text:
-            return None
+        # Extract the score from the "Score: X" format
+        import re
+        score_match = re.search(r"Score:\s*(\d)", response_text)
 
-        return context_item
+        if score_match:
+            score = int(score_match.group(1))
+            # THRESHOLD: Keep anything that isn't a 1 (Totally Unrelated)
+            if score > 2:
+                return context_item
+            else:
+                return None
+
+        return context_item  # Fail open if parsing fails
 
     except Exception as e:
         print(f"Error checking relevance: {e}")
-        # On error, keep the document (fail open)
-        return context_item
-
+        return context_item  # Fail open
 
 async def generate_final_answer(client, query, valid_contexts):
     """
@@ -136,7 +149,6 @@ async def generate_final_answer(client, query, valid_contexts):
 
     prompt = f"""You are a helpful assistant. Answer the query based on the provided documents.
 
-Important instructions:
 - Use the information from the documents to answer the query
 - If the documents contain partial information, provide that information
 - Be concise but complete in your answer
@@ -160,7 +172,7 @@ Answer:"""
                 model=MODEL_NAME,
                 contents=prompt,
                 config=types.GenerateContentConfig(
-                    temperature=0.2,  # Slightly higher for more natural answers
+                    temperature=0.2,
                     safety_settings=SAFETY_SETTINGS
                 )
             )
@@ -180,6 +192,7 @@ async def process_entry(client, entry, semaphore):
         query = entry.get("query", "")
         contexts = entry.get("contexts", [])
         task_id = entry.get("task_id", "unknown")
+        input = entry.get("input", "unknown")
         collection = entry.get("Collection", "")
 
         # Only look at first 5 contexts
@@ -202,6 +215,7 @@ async def process_entry(client, entry, semaphore):
             "query": query,
             "predictions": [{"text": final_answer}],
             "contexts": filtered_contexts,
+            "input": input,
             "Collection": collection
         }
 
