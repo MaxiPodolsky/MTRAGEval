@@ -225,15 +225,13 @@ async def process_query_batch(queries, batch_size=10):
     for i in range(0, len(queries), batch_size):
         batch = queries[i:i + batch_size]
 
-        # Extract full conversations (user + agent turns)
+        # Extract full conversations
         batch_conversations = []
         for q in batch:
             if "input" in q:
-                # Extract full conversation with both user and agent
                 conversation = extract_full_conversation(q["input"])
                 batch_conversations.append(conversation)
             else:
-                # Fallback to text field if input array doesn't exist
                 batch_conversations.append([("user", q.get("text", ""))])
 
         # Rewrite queries in parallel
@@ -247,7 +245,6 @@ async def process_query_batch(queries, batch_size=10):
         for j, (query_obj, query_text) in enumerate(zip(batch, rewritten_texts)):
             if isinstance(query_text, Exception):
                 print(f"Error rewriting query: {query_text}")
-                # Fallback to last user message
                 conv = batch_conversations[j]
                 last_user = [text for speaker, text in conv if speaker == "user"]
                 query_text = last_user[-1] if last_user else ""
@@ -255,26 +252,15 @@ async def process_query_batch(queries, batch_size=10):
             task_id = query_obj.get("task_id", query_obj.get("_id", "unknown"))
             collection_name = query_obj.get("Collection", "")
 
-            # Map collection name to corpus key
-            corpus_key = collection_name
-
-            if not corpus_key:
-                print(f"Warning: Unknown collection '{collection_name}' for task {task_id}")
+            if not collection_name:
+                print(f"Warning: Unknown collection for task {task_id}")
                 continue
 
-            if not query_text:
-                print(f"Warning: Empty query for task_id={task_id}, skipping...")
-                continue
+            contexts = dense_search(query_text, collection_name, top_k=TOP_K)
 
-            # Perform dense search on the appropriate corpus
-            contexts = dense_search(query_text, corpus_key, top_k=TOP_K)
-
-            # Create result object by copying original input and adding contexts
             result_obj = query_obj.copy()
             result_obj["contexts"] = contexts
-
-            # Note: We do not explicitly add the rewritten query to the root object
-            # to strictly adhere to the requested output format which keeps the structure clean.
+            result_obj["rewritten"] = query_text
 
             results.append(result_obj)
 
