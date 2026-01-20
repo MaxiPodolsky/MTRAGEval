@@ -1,4 +1,5 @@
 data/
 *.zip
-*.jsonl
 *.env
+*.csv
+*.xml
